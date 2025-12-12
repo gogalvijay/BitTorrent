@@ -8,26 +8,81 @@
 
 using json = nlohmann::json;
 
-json decode_bencoded_value(const std::string& encoded_value) {
-    if (std::isdigit(encoded_value[0])) {
-        // Example: "5:hello" -> "hello"
-        size_t colon_index = encoded_value.find(':');
-        if (colon_index != std::string::npos) {
-            std::string number_string = encoded_value.substr(0, colon_index);
-            int64_t number = std::atoll(number_string.c_str());
-            std::string str = encoded_value.substr(colon_index + 1, number);
-            return json(str);
-        } else {
-            throw std::runtime_error("Invalid encoded value: " + encoded_value);
+
+
+
+long long decode_integer(const std::string& s, int& l) {
+    if (s[l] != 'i') throw std::runtime_error("Expected 'i' at integer start");
+    l++; 
+    bool minus = false;
+    if (s[l] == '-') { minus = true; l++; }
+
+    long long val = 0;
+    while (std::isdigit(s[l])) {
+        val = val * 10 + (s[l] - '0');
+        l++;
+    }
+    if (s[l] != 'e') throw std::runtime_error("Expected 'e' at integer end");
+    l++; 
+
+    return minus ? -val : val;
+}
+
+// Decode a string at position l in the encoded string
+std::string decode_string(const std::string& s, int& l) {
+    int sz = 0;
+    while (std::isdigit(s[l])) {
+        sz = sz * 10 + (s[l] - '0');
+        l++;
+    }
+    if (s[l] != ':') throw std::runtime_error("Expected ':' after string length");
+    l++; 
+
+    std::string result;
+    for (int i = 0; i < sz; i++) {
+        result += s[l++];
+    }
+    return result;
+}
+
+// Decode a list at position l in the encoded string
+json decode_list(const std::string& s, int& l) {
+    if (s[l] != 'l') throw std::runtime_error("Expected 'l' at list start");
+    l++; 
+
+    json result = json::array();
+    while (s[l] != 'e') {
+        if (std::isdigit(s[l])) { 
+            result.push_back(decode_string(s, l));
+        }
+        else if (s[l] == 'i') { 
+            result.push_back(decode_integer(s, l));
+        }
+        else if (s[l] == 'l') { 
+            result.push_back(decode_list(s, l));
+        }
+        else {
+            throw std::runtime_error("Unhandled encoded value: " + s.substr(l, 10));
         }
     }
-    else if(encoded_value[0] == 'i' && encoded_value.back() == 'e'){
-            std::string number_string = encoded_value.substr(1, encoded_value.size() - 2);
-            int64_t number = std::atoll(number_string.c_str());
-            return json(number);
+    l++; 
+    return result;
+}
+
+// Decode any Bencoded value
+json decode_bencoded_value(const std::string& s) {
+    int pos = 0;
+    if (std::isdigit(s[0])) { // string
+        return decode_string(s, pos);
+    }
+    else if (s[0] == 'i') { // integer
+        return decode_integer(s, pos);
+    }
+    else if (s[0] == 'l') { // list
+        return decode_list(s, pos);
     }
     else {
-        throw std::runtime_error("Unhandled encoded value: " + encoded_value);
+        throw std::runtime_error("Unhandled encoded value: " + s);
     }
 }
 
