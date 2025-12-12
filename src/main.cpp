@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdlib>
 #include<fstream>
+#include <openssl/sha.h>
 
 #include "lib/nlohmann/json.hpp"
 
@@ -11,6 +12,66 @@ using json = nlohmann::json;
 
 
 
+
+//--------------------------------encode---------------------------
+std::string bencode(const json &j);
+
+std::string bencode_int(long long x) {
+    return "i" + std::to_string(x) + "e";
+}
+
+std::string bencode_string(const std::string &s) {
+    return std::to_string(s.size()) + ":" + s;
+}
+
+std::string bencode_list(const json &j) {
+    std::string out = "l";
+    for (const auto &elem : j) {
+        out += bencode(elem);
+    }
+    out += "e";
+    return out;
+}
+
+std::string bencode_dict(const json &j) {
+    std::string out = "d";
+
+    std::vector<std::string> keys;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        keys.push_back(it.key());
+    }
+    sort(keys.begin(), keys.end());
+
+    for (const auto &key : keys) {
+        out += bencode_string(key);  
+        out += bencode(j.at(key));   
+    }
+
+    out += "e";
+    return out;
+}
+
+std::string bencode(const json &j) {
+    if (j.is_number_integer()) {
+        return bencode_int(j.get<long long>());
+    }
+    else if (j.is_string()) {
+        return bencode_string(j.get<std::string>());
+    }
+    else if (j.is_array()) {
+        return bencode_list(j);
+    }
+    else if (j.is_object()) {
+        return bencode_dict(j);
+    }
+
+    throw std::runtime_error("Unsupported type in bencode");
+}
+
+
+
+
+//--------------------------------decode-----------------------
 
 long long decode_integer(const std::string& s, int& l) {
     if (s[l] != 'i') throw std::runtime_error("Expected 'i' at integer start");
@@ -173,11 +234,31 @@ int main(int argc, char* argv[]) {
 
 	    json decode_file = decode_bencoded_value(file_content);
 	    
-	    //std::cerr<<decode_file<<'\n';
-
 	    std::cout << "Tracker URL: " << decode_file["announce"].get<std::string>() << "\n";
 	    //std::cout << "File Name: "  << decode_file["info"]["name"] << "\n";
 	    std::cout << "Length: "     << decode_file["info"]["length"].get<int>() << "\n";
+	    
+	    //std::cerr<<decode_file<<'\n';
+	    
+	    auto info_content =decode_file["info"];
+	    
+	    auto encoded_content_hash=bencode(info_content);
+	    
+	    
+	    unsigned char hash[20];
+	    SHA1((unsigned char*)encoded_content_hash.data(),
+                  encoded_content_hash.size(),
+		  hash);
+
+	   std::ostringstream hex;
+	    for (int i = 0; i < 20; i++) {
+	    	hex << std::hex
+		<< std::setw(2)
+		<< std::setfill('0')
+		<< ((int)hash[i] & 0xff);
+	    }
+
+	    std::cout << "Info Hash: " << hex.str() << "\n"; 
     }
 
     else {
