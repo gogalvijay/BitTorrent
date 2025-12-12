@@ -69,6 +69,48 @@ json decode_list(const std::string& s, int& l) {
     return result;
 }
 
+// Decode a dictionary at position l in the encoded string
+
+json decode_dictionary(const std::string &s, int &l) {
+    if (s[l] != 'd') throw std::runtime_error("Expected 'd' at dictionary start");
+    l++; 
+
+    json result = json::object();
+
+    while (s[l] != 'e') {
+       
+        std::string key_string;
+        long long key_int;
+
+        if (std::isdigit(s[l])) {
+            key_string = decode_string(s, l);
+        } else if (s[l] == 'i') {
+            key_int = decode_integer(s, l);
+            key_string = std::to_string(key_int); 
+        } else {
+            throw std::runtime_error("Invalid key type in dictionary");
+        }
+
+        if (std::isdigit(s[l])) {
+            result[key_string] = decode_string(s, l);
+        } else if (s[l] == 'i') {
+            result[key_string] = decode_integer(s, l);
+        } else if (s[l] == 'l') {
+            result[key_string] = decode_list(s, l);
+        } else if (s[l] == 'd') {
+            result[key_string] = decode_dictionary(s, l); 
+        } else {
+            throw std::runtime_error("Invalid value type in dictionary");
+        }
+    }
+
+    l++; 
+    return result;
+}
+
+	
+
+
 // Decode any Bencoded value
 json decode_bencoded_value(const std::string& s) {
     int pos = 0;
@@ -80,6 +122,9 @@ json decode_bencoded_value(const std::string& s) {
     }
     else if (s[0] == 'l') { // list
         return decode_list(s, pos);
+    }
+    else if(s[0] == 'd'){//dictionary
+    	 return decode_dictionary(s,pos);
     }
     else {
         throw std::runtime_error("Unhandled encoded value: " + s);
