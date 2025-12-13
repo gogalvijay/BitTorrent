@@ -1,14 +1,39 @@
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <openssl/sha.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <random>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <cctype>
-#include <cstdlib>
-#include<fstream>
-#include <openssl/sha.h>
 
 #include "lib/nlohmann/json.hpp"
 
 using json = nlohmann::json;
+
+
+std::string url_encode(const unsigned char *d, size_t n) {
+    std::ostringstream o;
+    o << std::hex << std::uppercase;
+    for (size_t i = 0; i < n; i++)
+        o << '%' << std::setw(2) << std::setfill('0') << int(d[i]);
+    return o.str();
+}
+
+std::string random_peer_id() {
+    std::string s = "-CC0001-";
+    std::random_device r;
+    while (s.size() < 20) s += char('0' + (r() % 10));
+    return s;
+}
+
 
 
 
@@ -294,6 +319,128 @@ int main(int argc, char* argv[]) {
 	   
 	   
     }
+    
+    else if (command == "peers") {
+    std::string file_name = argv[2];
+
+    std::ifstream in(file_name, std::ios::binary);
+    if (!in) return 1;
+
+    std::string file_content(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>()
+    );
+
+    json meta = decode_bencoded_value(file_content);
+    json info = meta["info"];
+
+    long long length = info["length"].get<long long>();
+
+    std::string encoded_info = bencode(info);
+
+    unsigned char info_hash[20];
+    SHA1(
+        (unsigned char *)encoded_info.data(),
+        encoded_info.size(),
+        info_hash
+    );
+
+    std::string peer_id =random_peer_id();
+
+    std::string announce = meta["announce"].get<std::string>();
+    std::string url = announce.substr(7);
+    size_t slash = url.find('/');
+    std::string hostport = url.substr(0, slash);
+    std::string path = url.substr(slash);
+
+    std::string host, port = "80";
+    size_t colon = hostport.find(':');
+    if (colon != std::string::npos) {
+        host = hostport.substr(0, colon);
+        port = hostport.substr(colon + 1);
+    } else {
+        host = hostport;
+    }
+
+    addrinfo hints{}, *res;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0) return 1;
+
+    int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sockfd < 0) return 1;
+
+    if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) return 1;
+    freeaddrinfo(res);
+
+    auto url_encode = [](const unsigned char *d, size_t n) {
+        std::ostringstream o;
+        o << std::hex << std::uppercase;
+        for (size_t i = 0; i < n; i++)
+            o << '%' << std::setw(2) << std::setfill('0') << int(d[i]);
+        return o.str();
+    };
+
+    std::ostringstream req;
+    req << "GET " << path
+        << "?info_hash=" << url_encode(info_hash, 20)
+        << "&peer_id=" << url_encode((unsigned char *)peer_id.data(), 20)
+        << "&port=6881"
+        << "&uploaded=0"
+        << "&downloaded=0"
+        << "&left=" << length
+        << "&compact=1 HTTP/1.0\r\n"
+        << "Host: " << host << "\r\n"
+        << "Connection: close\r\n\r\n";
+
+    std::string request = req.str();
+    send(sockfd, request.data(), request.size(), 0);
+
+    std::vector<uint8_t> response;
+    char buf[4096];
+    ssize_t n;
+    while ((n = recv(sockfd, buf, sizeof(buf), 0)) > 0)
+        response.insert(response.end(), buf, buf + n);
+
+    close(sockfd);
+
+    auto it = std::search(
+        response.begin(),
+        response.end(),
+        "\r\n\r\n",
+        "\r\n\r\n" + 4
+    );
+
+    if (it == response.end()) return 0;
+    it += 4;
+
+    std::string body(it, response.end());
+    int pos = 0;
+    json tracker = decode_dictionary(body, pos);
+
+    if (!tracker.contains("peers")) return 0;
+
+    std::string peers = tracker["peers"].get<std::string>();
+
+    for (size_t i = 0; i + 6 <= peers.size(); i += 6) {
+        uint8_t a = peers[i];
+        uint8_t b = peers[i + 1];
+        uint8_t c = peers[i + 2];
+        uint8_t d = peers[i + 3];
+
+        uint16_t p =
+            ((uint8_t)peers[i + 4] << 8) |
+            (uint8_t)peers[i + 5];
+
+        std::cout
+            << (int)a << "."
+            << (int)b << "."
+            << (int)c << "."
+            << (int)d
+            << ":" << p << "\n";
+    }
+  }
+
 
     else {
         std::cerr << "unknown command: " << command << std::endl;
@@ -302,3 +449,4 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+
