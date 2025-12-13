@@ -193,6 +193,20 @@ json decode_bencoded_value(const std::string& s) {
     }
 }
 
+
+std::ostringstream hex_converter( unsigned char *hash){
+
+        std::ostringstream hex;
+	for (int i = 0; i < 20; i++) {
+	    	hex << std::hex
+		<< std::setw(2)
+		<< std::setfill('0')
+		<< ((int)hash[i] & 0xff);
+	    }
+	return hex;
+}
+
+
 int main(int argc, char* argv[]) {
     // Flush after every std::cout / std::cerr
     std::cout << std::unitbuf;
@@ -250,15 +264,35 @@ int main(int argc, char* argv[]) {
                   encoded_content_hash.size(),
 		  hash);
 
-	   std::ostringstream hex;
-	    for (int i = 0; i < 20; i++) {
-	    	hex << std::hex
-		<< std::setw(2)
-		<< std::setfill('0')
-		<< ((int)hash[i] & 0xff);
-	    }
+	   std::ostringstream hex=hex_converter(hash);  
+	   std::cout << "Info Hash: " << hex.str() << "\n"; 
+	   
+	   
+	   auto piece_len = decode_file["info"]["piece length"].get<int>();
+	   auto pieces = decode_file["info"]["pieces"].get<std::string>();
+	    
 
-	    std::cout << "Info Hash: " << hex.str() << "\n"; 
+	   
+	   std::cout<< "Piece Length: "<<piece_len<< "\n";
+	   std::cout<<"Piece Hashes:"<<"\n";
+	   
+	   
+	   
+	   int j = 0;
+	   for (size_t i = 0; i < pieces.size(); i++) {
+	        hash[j++] = (unsigned char)pieces[i];
+
+	        if (j == 20) {
+		    std::ostringstream hex = hex_converter(hash);
+		    std::cout << hex.str() << '\n';
+		    j = 0;
+	        }
+	   }
+
+ 		
+	   
+	   
+	   
     }
 
     else {
