@@ -440,6 +440,82 @@ int main(int argc, char* argv[]) {
             << ":" << p << "\n";
     }
   }
+  
+   else if (command == "handshake")
+{
+    std::string peer_info = argv[3];
+    std::string peer_ip, peer_port;
+
+    int i = 0;
+    while (i < (int)peer_info.size() && peer_info[i] != ':')
+        peer_ip += peer_info[i++];
+
+    i++;
+    while (i < (int)peer_info.size())
+        peer_port += peer_info[i++];
+
+    int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket < 0)
+        return 1;
+
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(stoi(peer_port));
+    serverAddress.sin_addr.s_addr = inet_addr(peer_ip.c_str());
+
+    if (connect(clientSocket, (sockaddr*)&serverAddress, sizeof(serverAddress)) < 0)
+        return 1;
+
+    std::ifstream in(argv[2], std::ios::binary);
+    if (!in)
+        return 1;
+
+    std::string file_content(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>()
+    );
+
+    json meta = decode_bencoded_value(file_content);
+    json info = meta["info"];
+    std::string encoded_info = bencode(info);
+
+    unsigned char info_hash[20];
+    SHA1(
+        (unsigned char*)encoded_info.data(),
+        encoded_info.size(),
+        info_hash
+    );
+
+    std::vector<uint8_t> handshake;
+    handshake.push_back(19);
+
+    std::string proto = "BitTorrent protocol";
+    handshake.insert(handshake.end(), proto.begin(), proto.end());
+
+    handshake.insert(handshake.end(), 8, 0);
+    handshake.insert(handshake.end(), info_hash, info_hash + 20);
+
+    std::string peer_id = random_peer_id();
+    handshake.insert(handshake.end(), peer_id.begin(), peer_id.end());
+
+    send(clientSocket, handshake.data(), handshake.size(), 0);
+
+    std::vector<uint8_t> response(68);
+    int received = 0;
+    while (received < 68) {
+        int r = recv(clientSocket, response.data() + received, 68 - received, 0);
+        if (r <= 0)
+            return 1;
+        received += r;
+    }
+
+    int offset = 1 + 19 + 8 + 20;
+    std::cout << "Peer ID: ";
+    for (int i = 0; i < 20; i++)
+        printf("%02x", response[offset + i]);
+    std::cout << "\n";
+}
+
 
 
     else {
