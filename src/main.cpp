@@ -963,8 +963,13 @@ int main(int argc, char* argv[]) {
     }
 
     out.close();
-    close(sock);
-    std::cout << "Download complete\n";
+
+
+shutdown(sock, SHUT_RDWR);
+close(sock);
+
+std::cout << "Download complete\n";
+return 0;   
 }
 
   
