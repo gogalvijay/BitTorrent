@@ -255,6 +255,18 @@ int parse_int(const std::string &s) {
 }
 
 
+bool verify_piece(const std::vector<uint8_t>& piece_data,const std::string& pieces,int piece_index) {
+    unsigned char hash[20];
+    SHA1(piece_data.data(), piece_data.size(), hash);
+
+    for (int i = 0; i < 20; i++) {
+        if ((unsigned char)pieces[piece_index * 20 + i] != hash[i])
+            return false;
+    }
+    return true;
+}
+
+
 int main(int argc, char* argv[]) {
     // Flush after every std::cout / std::cerr
     std::cout << std::unitbuf;
@@ -567,7 +579,7 @@ int main(int argc, char* argv[]) {
         unsigned char info_hash[20];
         SHA1((unsigned char*)encoded_info.data(), encoded_info.size(), info_hash);
 
-        // 2. Get Peer from Tracker (Logic adapted from your "peers" command)
+        
         std::string announce = meta["announce"].get<std::string>();
         std::string url = announce.substr(7);
         size_t slash = url.find('/');
@@ -748,6 +760,218 @@ int main(int argc, char* argv[]) {
         close(clientSocket);
         std::cout << "Piece " << piece_index << " downloaded to " << output_path << "\n";
     }
+    
+    else if (command == "download") {
+
+    if (argc < 5) {
+        std::cerr << "Usage: download -o <output_path> <torrent_path>\n";
+        return 1;
+    }
+
+    std::string output_path = argv[3];
+    std::string torrent_path = argv[4];
+
+  
+    std::ifstream in(torrent_path, std::ios::binary);
+    if (!in) return 1;
+
+    std::string file_content(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>()
+    );
+
+    json meta = decode_bencoded_value(file_content);
+    json info = meta["info"];
+
+    long long file_length = info["length"].get<long long>();
+    int piece_length = info["piece length"].get<int>();
+    std::string pieces = info["pieces"].get<std::string>();
+
+    int total_pieces = (file_length + piece_length - 1) / piece_length;
+
+    
+    std::string encoded_info = bencode(info);
+    unsigned char info_hash[20];
+    SHA1((unsigned char*)encoded_info.data(), encoded_info.size(), info_hash);
+
+    
+    std::string announce = meta["announce"].get<std::string>();
+    std::string url = announce.substr(7);
+    size_t slash = url.find('/');
+    std::string hostport = url.substr(0, slash);
+    std::string path = url.substr(slash);
+
+    std::string host, port = "80";
+    size_t colon = hostport.find(':');
+    if (colon != std::string::npos) {
+        host = hostport.substr(0, colon);
+        port = hostport.substr(colon + 1);
+    } else host = hostport;
+
+    addrinfo hints{}, *res;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    getaddrinfo(host.c_str(), port.c_str(), &hints, &res);
+
+    int trackerSock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    connect(trackerSock, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+
+    std::string peer_id = random_peer_id();
+
+    auto url_encode_local = [](const unsigned char *d, size_t n) {
+        std::ostringstream o;
+        o << std::hex << std::uppercase;
+        for (size_t i = 0; i < n; i++)
+            o << '%' << std::setw(2) << std::setfill('0') << int(d[i]);
+        return o.str();
+    };
+
+    std::ostringstream req;
+    req << "GET " << path
+        << "?info_hash=" << url_encode_local(info_hash, 20)
+        << "&peer_id=" << url_encode_local((unsigned char*)peer_id.data(), 20)
+        << "&port=6881"
+        << "&uploaded=0"
+        << "&downloaded=0"
+        << "&left=" << file_length
+        << "&compact=1 HTTP/1.0\r\n"
+        << "Host: " << host << "\r\n\r\n";
+
+    send(trackerSock, req.str().data(), req.str().size(), 0);
+
+    std::vector<uint8_t> tracker_resp;
+    char buf[4096];
+    int n;
+    while ((n = recv(trackerSock, buf, sizeof(buf), 0)) > 0)
+        tracker_resp.insert(tracker_resp.end(), buf, buf + n);
+    close(trackerSock);
+
+    auto it = std::search(
+        tracker_resp.begin(), tracker_resp.end(),
+        "\r\n\r\n", "\r\n\r\n" + 4
+    );
+    std::string body(it + 4, tracker_resp.end());
+    int pos = 0;
+    json tracker = decode_dictionary(body, pos);
+
+    std::string peers_bin = tracker["peers"].get<std::string>();
+    uint8_t a = peers_bin[0], b = peers_bin[1], c = peers_bin[2], d = peers_bin[3];
+    uint16_t peer_port = ((uint8_t)peers_bin[4] << 8) | (uint8_t)peers_bin[5];
+
+    std::string peer_ip =
+        std::to_string(a) + "." + std::to_string(b) + "." +
+        std::to_string(c) + "." + std::to_string(d);
+
+   
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(peer_port);
+    addr.sin_addr.s_addr = inet_addr(peer_ip.c_str());
+    connect(sock, (sockaddr*)&addr, sizeof(addr));
+
+    
+    std::vector<uint8_t> hs;
+    hs.push_back(19);
+    std::string proto = "BitTorrent protocol";
+    hs.insert(hs.end(), proto.begin(), proto.end());
+    hs.insert(hs.end(), 8, 0);
+    hs.insert(hs.end(), info_hash, info_hash + 20);
+    hs.insert(hs.end(), peer_id.begin(), peer_id.end());
+    send(sock, hs.data(), hs.size(), 0);
+
+    std::vector<uint8_t> resp(68);
+    recv_all(sock, resp.data(), 68);
+
+    
+    uint32_t len = htonl(1);
+    uint8_t id = 2;
+    send(sock, &len, 4, 0);
+    send(sock, &id, 1, 0);
+
+ 
+    while (true) {
+        uint32_t l;
+        recv_all(sock, (uint8_t*)&l, 4);
+        l = ntohl(l);
+        if (l == 0) continue;
+        uint8_t mid;
+        recv_all(sock, &mid, 1);
+        if (mid == 1) break;
+        std::vector<uint8_t> skip(l - 1);
+        recv_all(sock, skip.data(), l - 1);
+    }
+
+   
+    std::ofstream out(output_path, std::ios::binary);
+
+    for (int piece = 0; piece < total_pieces; piece++) {
+
+        int curr_size = piece_length;
+        if (piece == total_pieces - 1 && file_length % piece_length)
+            curr_size = file_length % piece_length;
+
+        std::vector<uint8_t> piece_data;
+        int downloaded = 0;
+
+        while (downloaded < curr_size) {
+            int req_len = std::min(16 * 1024, curr_size - downloaded);
+
+            uint32_t mlen = htonl(13);
+            uint8_t mid = 6;
+            uint32_t idx = htonl(piece);
+            uint32_t begin = htonl(downloaded);
+            uint32_t rlen = htonl(req_len);
+
+            send(sock, &mlen, 4, 0);
+            send(sock, &mid, 1, 0);
+            send(sock, &idx, 4, 0);
+            send(sock, &begin, 4, 0);
+            send(sock, &rlen, 4, 0);
+
+            uint32_t resp_len;
+            recv_all(sock, (uint8_t*)&resp_len, 4);
+            resp_len = ntohl(resp_len);
+
+            uint8_t rid;
+            recv_all(sock, &rid, 1);
+
+            recv_all(sock, (uint8_t*)&idx, 4);
+            recv_all(sock, (uint8_t*)&begin, 4);
+
+            int data_len = resp_len - 9;
+            std::vector<uint8_t> block(data_len);
+            recv_all(sock, block.data(), data_len);
+
+            piece_data.insert(piece_data.end(), block.begin(), block.end());
+            downloaded += data_len;
+        }
+
+        unsigned char h[20];
+        SHA1(piece_data.data(), piece_data.size(), h);
+
+        for (int i = 0; i < 20; i++) {
+            if ((unsigned char)pieces[piece * 20 + i] != h[i]) {
+                std::cerr << "Piece hash mismatch\n";
+                return 1;
+            }
+        }
+
+        out.write((char*)piece_data.data(), piece_data.size());
+        std::cout << "Downloaded piece " << piece << "\n";
+    }
+
+    out.close();
+
+
+shutdown(sock, SHUT_RDWR);
+close(sock);
+
+std::cout << "Download complete\n";
+return 0;   
+}
+
   
     
    
