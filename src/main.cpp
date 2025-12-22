@@ -79,6 +79,21 @@ namespace BitTorrent {
             SHA1(input.data(), input.size(), hash.data());
             return hash;
         }
+        
+        static std::string UrlDecode(const std::string& str) {
+            std::string ret;
+            for (size_t i = 0; i < str.length(); i++) {
+                if (str[i] == '%' && i + 2 < str.length()) {
+                    std::string hex = str.substr(i + 1, 2);
+                    char ch = static_cast<char>(std::stoi(hex, nullptr, 16));
+                    ret += ch;
+                    i += 2;
+                } else {
+                    ret += str[i];
+                }
+            }
+            return ret;
+        }
     };
 
     class BEncoder {
@@ -531,6 +546,45 @@ int main(int argc, char* argv[]) {
             close(sock);
             std::cout << "Download complete\n";
         } 
+        else if(cmd == "magnet_parse"){
+            if (argc < 3) return 1;
+            std::string magnet_link = argv[2];
+            
+            std::string prefix = "magnet:?";
+            if (magnet_link.find(prefix) == 0) {
+                magnet_link = magnet_link.substr(prefix.length());
+            }
+
+            std::string tracker_url;
+            std::string info_hash;
+
+            std::stringstream ss(magnet_link);
+            std::string segment;
+
+            while (std::getline(ss, segment, '&')) {
+                size_t split_pos = segment.find('=');
+                if (split_pos == std::string::npos) continue;
+
+                std::string key = segment.substr(0, split_pos);
+                std::string val = segment.substr(split_pos + 1);
+
+                if (key == "xt") {
+                    
+                    size_t pos = val.rfind(':');
+                    if (pos != std::string::npos) {
+                        info_hash = val.substr(pos + 1);
+                    } else {
+                        info_hash = val;
+                    }
+                } 
+                else if (key == "tr") {
+                    tracker_url = BitTorrent::Utils::UrlDecode(val);
+                }
+            }
+
+            std::cout << "Tracker URL: " << tracker_url << "\n";
+            std::cout << "Info Hash: " << info_hash << "\n";
+        }
         else {
             std::cerr << "Unknown command: " << cmd << "\n";
             return 1;
