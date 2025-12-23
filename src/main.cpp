@@ -94,6 +94,16 @@ namespace BitTorrent {
             }
             return ret;
         }
+        
+        static std::vector<uint8_t> HexToBytes(const std::string& hex) {
+            std::vector<uint8_t> bytes;
+            for (unsigned int i = 0; i < hex.length(); i += 2) {
+                std::string byteString = hex.substr(i, 2);
+                uint8_t byte = (uint8_t)strtol(byteString.c_str(), nullptr, 16);
+                bytes.push_back(byte);
+            }
+            return bytes;
+        }
     };
 
     class BEncoder {
@@ -322,7 +332,7 @@ namespace BitTorrent {
             return peers;
         }
 
-        static int PerformHandshake(const std::string& ip, uint16_t port, const TorrentInfo& t, std::vector<uint8_t>& out_peer_id) {
+        /*static int PerformHandshake(const std::string& ip, uint16_t port, const TorrentInfo& t, std::vector<uint8_t>& out_peer_id) {
             int sock = Network::Connect(ip, port);
             if (sock < 0) throw std::runtime_error("Connection to peer failed");
 
@@ -331,6 +341,37 @@ namespace BitTorrent {
             std::string protocol = "BitTorrent protocol";
             handshake.insert(handshake.end(), protocol.begin(), protocol.end());
             handshake.insert(handshake.end(), 8, 0); 
+            handshake.insert(handshake.end(), t.info_hash_raw.begin(), t.info_hash_raw.end());
+            std::string my_id = Utils::GeneratePeerId();
+            handshake.insert(handshake.end(), my_id.begin(), my_id.end());
+
+            Network::SendAll(sock, handshake.data(), handshake.size());
+
+            std::vector<uint8_t> response(HANDSHAKE_LEN);
+            Network::RecvAll(sock, response.data(), HANDSHAKE_LEN);
+
+            out_peer_id.assign(response.begin() + 48, response.end());
+            return sock;
+        } */
+        
+       
+        static int PerformHandshake(const std::string& ip, uint16_t port, const TorrentInfo& t, std::vector<uint8_t>& out_peer_id, bool support_extensions = false) {
+            int sock = Network::Connect(ip, port);
+            if (sock < 0) throw std::runtime_error("Connection to peer failed");
+
+            std::vector<uint8_t> handshake;
+            handshake.push_back(19);
+            std::string protocol = "BitTorrent protocol";
+            handshake.insert(handshake.end(), protocol.begin(), protocol.end());
+
+           
+            std::vector<uint8_t> reserved(8, 0);
+            if (support_extensions) {
+               
+                reserved[5] |= 0x10; 
+            }
+            handshake.insert(handshake.end(), reserved.begin(), reserved.end()); 
+          
             handshake.insert(handshake.end(), t.info_hash_raw.begin(), t.info_hash_raw.end());
             std::string my_id = Utils::GeneratePeerId();
             handshake.insert(handshake.end(), my_id.begin(), my_id.end());
@@ -584,6 +625,62 @@ int main(int argc, char* argv[]) {
 
             std::cout << "Tracker URL: " << tracker_url << "\n";
             std::cout << "Info Hash: " << info_hash << "\n";
+        }
+        else if (cmd == "magnet_handshake") {
+            if (argc < 3) return 1;
+            std::string magnet_link = argv[2];
+            
+           
+            std::string prefix = "magnet:?";
+            if (magnet_link.find(prefix) == 0) {
+                magnet_link = magnet_link.substr(prefix.length());
+            }
+
+            std::string tracker_url;
+            std::string info_hash_hex;
+
+            std::stringstream ss(magnet_link);
+            std::string segment;
+
+            while (std::getline(ss, segment, '&')) {
+                size_t split_pos = segment.find('=');
+                if (split_pos == std::string::npos) continue;
+
+                std::string key = segment.substr(0, split_pos);
+                std::string val = segment.substr(split_pos + 1);
+
+                if (key == "xt") {
+                    size_t pos = val.rfind(':');
+                    if (pos != std::string::npos) {
+                        info_hash_hex = val.substr(pos + 1);
+                    } else {
+                        info_hash_hex = val;
+                    }
+                } else if (key == "tr") {
+                    tracker_url = BitTorrent::Utils::UrlDecode(val);
+                }
+            }
+
+            if (tracker_url.empty() || info_hash_hex.empty()) {
+                std::cerr << "Invalid magnet link\n";
+                return 1;
+            }
+
+            BitTorrent::TorrentInfo t;
+            t.announce = tracker_url;
+            t.info_hash_raw = BitTorrent::Utils::HexToBytes(info_hash_hex);
+            t.length = 999; 
+
+           
+            auto peers = BitTorrent::Client::GetPeers(t);
+            if (peers.empty()) return 1;
+
+          
+            std::vector<uint8_t> peer_id;
+            int sock = BitTorrent::Client::PerformHandshake(peers[0].ip, peers[0].port, t, peer_id, true);
+            close(sock);
+
+            std::cout << "Peer ID: " << BitTorrent::Utils::ToHex(peer_id.data(), 20) << "\n";
         }
         else {
             std::cerr << "Unknown command: " << cmd << "\n";
