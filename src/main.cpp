@@ -368,7 +368,7 @@ namespace BitTorrent {
             return sock;
         }
 
-        
+       
         static void ReadMessage(int sock, std::vector<uint8_t>& buffer) {
              uint32_t len;
              Network::RecvAll(sock, &len, 4);
@@ -405,12 +405,11 @@ namespace BitTorrent {
             std::vector<uint8_t> msg;
             ReadMessage(sock, msg);
 
-            
+           
             if (msg.size() < 2 || msg[0] != 20 || msg[1] != 0) {
                  throw std::runtime_error("Invalid extension handshake response");
             }
 
-            
             std::string payload(msg.begin() + 2, msg.end());
             json decoded = BEncoder::Decode(payload);
 
@@ -419,8 +418,30 @@ namespace BitTorrent {
             }
             throw std::runtime_error("Peer does not support ut_metadata");
         }
-       
 
+       
+        static void SendMetadataRequest(int sock, int ext_id, int piece_index) {
+          
+            json payload;
+            payload["msg_type"] = 0;
+            payload["piece"] = piece_index;
+            std::string bencoded_payload = BEncoder::Encode(payload);
+
+           
+            uint32_t len = htonl(1 + 1 + bencoded_payload.size());
+            uint8_t msg_id = 20;
+            uint8_t extension_id = static_cast<uint8_t>(ext_id);
+
+            std::vector<uint8_t> packet;
+            packet.resize(4);
+            std::memcpy(packet.data(), &len, 4);
+            packet.push_back(msg_id);
+            packet.push_back(extension_id);
+            packet.insert(packet.end(), bencoded_payload.begin(), bencoded_payload.end());
+
+            Network::SendAll(sock, packet.data(), packet.size());
+        }
+       
         static void WaitForUnchoke(int sock) {
             uint32_t len = htonl(1);
             uint8_t id = 2; 
@@ -453,7 +474,7 @@ namespace BitTorrent {
 
             int block_count = (current_piece_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-           
+            
             for (int i = 0; i < block_count; i++) {
                 int begin = i * BLOCK_SIZE;
                 int len = BLOCK_SIZE;
@@ -465,7 +486,7 @@ namespace BitTorrent {
                 uint32_t b = htonl(begin);
                 uint32_t l = htonl(len);
 
-               
+                
                 uint8_t req_buf[17];
                 std::memcpy(req_buf, &msg_len, 4);
                 std::memcpy(req_buf + 4, &id, 1);
@@ -479,7 +500,7 @@ namespace BitTorrent {
             std::vector<uint8_t> piece_data(current_piece_size);
             long long downloaded = 0;
 
-           
+            
             while (downloaded < current_piece_size) {
                 uint32_t msg_len;
                 Network::RecvAll(sock, &msg_len, 4);
@@ -513,7 +534,7 @@ namespace BitTorrent {
                 }
             }
 
-           
+            
             std::vector<uint8_t> hash = Utils::CalculateSHA1(piece_data);
             std::string expected_hash_str = t.pieces.substr(piece_idx * 20, 20);
             
@@ -648,7 +669,7 @@ int main(int argc, char* argv[]) {
                 std::string val = segment.substr(split_pos + 1);
 
                 if (key == "xt") {
-                   
+                    
                     size_t pos = val.rfind(':');
                     if (pos != std::string::npos) {
                         info_hash = val.substr(pos + 1);
@@ -714,7 +735,7 @@ int main(int argc, char* argv[]) {
             auto peers = BitTorrent::Client::GetPeers(t);
             if (peers.empty()) return 1;
 
-           
+            
             std::vector<uint8_t> peer_id;
             bool peer_supports_ext = false;
             
@@ -725,13 +746,78 @@ int main(int argc, char* argv[]) {
             std::vector<uint8_t> bitfield_msg;
             BitTorrent::Client::ReadMessage(sock, bitfield_msg);
 
-           
+            
             if (peer_supports_ext) {
                 BitTorrent::Client::SendExtensionHandshake(sock);
                 
         
                 int ext_id = BitTorrent::Client::ReceiveExtensionHandshake(sock);
                 std::cout << "Peer Metadata Extension ID: " << ext_id << "\n";
+            }
+
+            close(sock);
+        }
+      
+        else if (cmd == "magnet_info") {
+            if (argc < 3) return 1;
+            std::string magnet_link = argv[2];
+            
+            std::string prefix = "magnet:?";
+            if (magnet_link.find(prefix) == 0) {
+                magnet_link = magnet_link.substr(prefix.length());
+            }
+
+            std::string tracker_url;
+            std::string info_hash_hex;
+
+            std::stringstream ss(magnet_link);
+            std::string segment;
+
+            while (std::getline(ss, segment, '&')) {
+                size_t split_pos = segment.find('=');
+                if (split_pos == std::string::npos) continue;
+
+                std::string key = segment.substr(0, split_pos);
+                std::string val = segment.substr(split_pos + 1);
+
+                if (key == "xt") {
+                    size_t pos = val.rfind(':');
+                    if (pos != std::string::npos) {
+                        info_hash_hex = val.substr(pos + 1);
+                    } else {
+                        info_hash_hex = val;
+                    }
+                } else if (key == "tr") {
+                    tracker_url = BitTorrent::Utils::UrlDecode(val);
+                }
+            }
+
+            std::cout << "Tracker URL: " << tracker_url << "\n";
+
+            BitTorrent::TorrentInfo t;
+            t.announce = tracker_url;
+            t.info_hash_raw = BitTorrent::Utils::HexToBytes(info_hash_hex);
+            t.length = 999; 
+
+            auto peers = BitTorrent::Client::GetPeers(t);
+            if (peers.empty()) return 1;
+
+            std::vector<uint8_t> peer_id;
+            bool peer_supports_ext = false;
+            
+        
+            int sock = BitTorrent::Client::PerformHandshake(peers[0].ip, peers[0].port, t, peer_id, peer_supports_ext, true);
+            
+    
+            std::vector<uint8_t> bitfield_msg;
+            BitTorrent::Client::ReadMessage(sock, bitfield_msg);
+
+            if (peer_supports_ext) {
+              
+                BitTorrent::Client::SendExtensionHandshake(sock);
+                int ext_id = BitTorrent::Client::ReceiveExtensionHandshake(sock);
+             
+                BitTorrent::Client::SendMetadataRequest(sock, ext_id, 0);
             }
 
             close(sock);
