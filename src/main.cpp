@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <map>
 
 #include "lib/nlohmann/json.hpp"
 
@@ -137,6 +138,11 @@ namespace BitTorrent {
             return ParseValue(s, pos);
         }
 
+        static json Decode(const std::string& s, int& out_pos) {
+            out_pos = 0;
+            return ParseValue(s, out_pos);
+        }
+
     private:
         static json ParseValue(const std::string& s, int& i) {
             if (isdigit(s[i])) return ParseString(s, i);
@@ -187,21 +193,29 @@ namespace BitTorrent {
 
     class Network {
     public:
-        static int Connect(const std::string& ip, uint16_t port) {
-            int sock = socket(AF_INET, SOCK_STREAM, 0);
-            if (sock < 0) throw std::runtime_error("Socket creation failed");
+       static int Connect(const std::string& ip, uint16_t port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) throw std::runtime_error("Socket creation failed");
 
-            sockaddr_in addr{};
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(port);
-            addr.sin_addr.s_addr = inet_addr(ip.c_str());
+   
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
 
-            if (connect(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
-                close(sock);
-                return -1;
-            }
-            return sock;
-        }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr(ip.c_str());
+
+    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+    return sock;
+}
+
 
         static int ConnectHostname(const std::string& hostname, const std::string& port) {
             addrinfo hints{}, *res;
@@ -346,7 +360,7 @@ namespace BitTorrent {
                 reserved[5] |= 0x10; 
             }
             handshake.insert(handshake.end(), reserved.begin(), reserved.end()); 
-           
+            
             handshake.insert(handshake.end(), t.info_hash_raw.begin(), t.info_hash_raw.end());
             std::string my_id = Utils::GeneratePeerId();
             handshake.insert(handshake.end(), my_id.begin(), my_id.end());
@@ -358,7 +372,6 @@ namespace BitTorrent {
 
             out_peer_id.assign(response.begin() + 48, response.end());
 
-          
             if ((response[25] & 0x10) != 0) {
                 out_peer_supports_ext = true;
             } else {
@@ -387,7 +400,6 @@ namespace BitTorrent {
 
             std::string bencoded = BEncoder::Encode(handshake_payload);
 
-          
             uint32_t len = htonl(1 + 1 + bencoded.size());
             
             std::vector<uint8_t> msg;
@@ -400,47 +412,133 @@ namespace BitTorrent {
             Network::SendAll(sock, msg.data(), msg.size());
         }
 
-     
+        
         static int ReceiveExtensionHandshake(int sock) {
-            std::vector<uint8_t> msg;
-            ReadMessage(sock, msg);
+            while (true) {
+                std::vector<uint8_t> msg;
+                ReadMessage(sock, msg);
 
-           
-            if (msg.size() < 2 || msg[0] != 20 || msg[1] != 0) {
-                 throw std::runtime_error("Invalid extension handshake response");
+                if (msg.empty()) continue; 
+
+              
+                if (msg[0] == 20) {
+                    if (msg.size() < 2) continue; 
+                    
+                    if (msg[1] == 0) { 
+                        std::string payload(msg.begin() + 2, msg.end());
+                        json decoded = BEncoder::Decode(payload);
+
+                        if (decoded.contains("m") && decoded["m"].contains("ut_metadata")) {
+                            return decoded["m"]["ut_metadata"].get<int>();
+                        }
+                        throw std::runtime_error("Peer does not support ut_metadata");
+                    }
+                }
+               
             }
-
-            std::string payload(msg.begin() + 2, msg.end());
-            json decoded = BEncoder::Decode(payload);
-
-            if (decoded.contains("m") && decoded["m"].contains("ut_metadata")) {
-                return decoded["m"]["ut_metadata"].get<int>();
-            }
-            throw std::runtime_error("Peer does not support ut_metadata");
         }
 
        
-        static void SendMetadataRequest(int sock, int ext_id, int piece_index) {
-          
-            json payload;
-            payload["msg_type"] = 0;
-            payload["piece"] = piece_index;
-            std::string bencoded_payload = BEncoder::Encode(payload);
+       static void SendMetadataRequest(int sock, int ext_id, int piece_index) {
+    json payload;
+    payload["msg_type"] = 0;
+    payload["piece"] = piece_index;
+    std::string bencoded_payload = BEncoder::Encode(payload);
 
-           
-            uint32_t len = htonl(1 + 1 + bencoded_payload.size());
-            uint8_t msg_id = 20;
-            uint8_t extension_id = static_cast<uint8_t>(ext_id);
+  
+    uint32_t msg_length = 1 + 1 + bencoded_payload.size();
+    uint32_t len = htonl(msg_length);
+    uint8_t msg_id = 20;
+    uint8_t extension_id = static_cast<uint8_t>(ext_id);
 
-            std::vector<uint8_t> packet;
-            packet.resize(4);
-            std::memcpy(packet.data(), &len, 4);
-            packet.push_back(msg_id);
-            packet.push_back(extension_id);
-            packet.insert(packet.end(), bencoded_payload.begin(), bencoded_payload.end());
+    std::vector<uint8_t> packet;
+    packet.resize(4);
+    std::memcpy(packet.data(), &len, 4);
+    packet.push_back(msg_id);
+    packet.push_back(extension_id);
+    packet.insert(packet.end(), bencoded_payload.begin(), bencoded_payload.end());
 
-            Network::SendAll(sock, packet.data(), packet.size());
+    Network::SendAll(sock, packet.data(), packet.size());
+}
+
+        
+       static std::vector<uint8_t> ReceiveMetadataResponse(int sock, int ext_id) {
+    while (true) {
+        uint32_t len;
+      
+     
+        ssize_t n = recv(sock, &len, 4, 0);
+        
+        
+        if (n == 0) {
+            throw std::runtime_error("Peer closed connection");
         }
+        if (n < 0) {
+            throw std::runtime_error("recv() error");
+        }
+        if (n < 4) {
+         
+            size_t received = n;
+            while (received < 4) {
+                n = recv(sock, ((char*)&len) + received, 4 - received, 0);
+                if (n <= 0) throw std::runtime_error("Connection closed during length read");
+                received += n;
+            }
+        }
+        
+        len = ntohl(len);
+        
+        
+        if (len == 0) {
+           
+            continue;
+        }
+        
+        if (len > 1000000) {
+            throw std::runtime_error("Message too large");
+        }
+        
+        std::vector<uint8_t> msg(len);
+        Network::RecvAll(sock, msg.data(), len);
+        
+     
+        uint8_t msg_id = msg[0];
+        if (msg_id != 20) {
+           
+            continue;
+        }
+        
+        if (msg.size() < 2) continue;
+        
+        uint8_t received_ext_id = msg[1];
+      
+        if (received_ext_id != ext_id) continue;
+        
+        std::string payload_str(msg.begin() + 2, msg.end());
+        
+        int dict_end_pos = 0;
+        json dict = BEncoder::Decode(payload_str, dict_end_pos);
+        
+        
+        
+        if (!dict.contains("msg_type")) continue;
+        
+        int msg_type = dict["msg_type"].get<int>();
+       
+        
+        if (msg_type == 1) {
+            std::vector<uint8_t> metadata;
+            size_t raw_data_start = 2 + dict_end_pos;
+            if (raw_data_start < msg.size()) {
+                metadata.assign(msg.begin() + raw_data_start, msg.end());
+            }
+            return metadata;
+        } else if (msg_type == 2) {
+            throw std::runtime_error("Peer rejected metadata request");
+        }
+    }
+}
+
        
         static void WaitForUnchoke(int sock) {
             uint32_t len = htonl(1);
@@ -474,7 +572,6 @@ namespace BitTorrent {
 
             int block_count = (current_piece_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-            
             for (int i = 0; i < block_count; i++) {
                 int begin = i * BLOCK_SIZE;
                 int len = BLOCK_SIZE;
@@ -486,7 +583,6 @@ namespace BitTorrent {
                 uint32_t b = htonl(begin);
                 uint32_t l = htonl(len);
 
-                
                 uint8_t req_buf[17];
                 std::memcpy(req_buf, &msg_len, 4);
                 std::memcpy(req_buf + 4, &id, 1);
@@ -500,7 +596,6 @@ namespace BitTorrent {
             std::vector<uint8_t> piece_data(current_piece_size);
             long long downloaded = 0;
 
-            
             while (downloaded < current_piece_size) {
                 uint32_t msg_len;
                 Network::RecvAll(sock, &msg_len, 4);
@@ -522,19 +617,16 @@ namespace BitTorrent {
                     std::vector<uint8_t> block(data_len);
                     Network::RecvAll(sock, block.data(), data_len);
 
-                    
                     if (begin + data_len <= current_piece_size) {
                         std::memcpy(piece_data.data() + begin, block.data(), data_len);
                         downloaded += data_len;
                     }
                 } else {
-                  
                     std::vector<uint8_t> ignore(msg_len - 1);
                     Network::RecvAll(sock, ignore.data(), msg_len - 1);
                 }
             }
 
-            
             std::vector<uint8_t> hash = Utils::CalculateSHA1(piece_data);
             std::string expected_hash_str = t.pieces.substr(piece_idx * 20, 20);
             
@@ -689,7 +781,6 @@ int main(int argc, char* argv[]) {
             if (argc < 3) return 1;
             std::string magnet_link = argv[2];
             
-          
             std::string prefix = "magnet:?";
             if (magnet_link.find(prefix) == 0) {
                 magnet_link = magnet_link.substr(prefix.length());
@@ -725,17 +816,14 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-        
             BitTorrent::TorrentInfo t;
             t.announce = tracker_url;
             t.info_hash_raw = BitTorrent::Utils::HexToBytes(info_hash_hex);
             t.length = 999; 
 
-         
             auto peers = BitTorrent::Client::GetPeers(t);
             if (peers.empty()) return 1;
 
-            
             std::vector<uint8_t> peer_id;
             bool peer_supports_ext = false;
             
@@ -743,85 +831,116 @@ int main(int argc, char* argv[]) {
             
             std::cout << "Peer ID: " << BitTorrent::Utils::ToHex(peer_id.data(), 20) << "\n";
 
-            std::vector<uint8_t> bitfield_msg;
-            BitTorrent::Client::ReadMessage(sock, bitfield_msg);
-
-            
             if (peer_supports_ext) {
                 BitTorrent::Client::SendExtensionHandshake(sock);
-                
-        
                 int ext_id = BitTorrent::Client::ReceiveExtensionHandshake(sock);
                 std::cout << "Peer Metadata Extension ID: " << ext_id << "\n";
             }
 
             close(sock);
         }
-      
         else if (cmd == "magnet_info") {
-            if (argc < 3) return 1;
-            std::string magnet_link = argv[2];
-            
-            std::string prefix = "magnet:?";
-            if (magnet_link.find(prefix) == 0) {
-                magnet_link = magnet_link.substr(prefix.length());
+    if (argc < 3) return 1;
+    std::string magnet_link = argv[2];
+    
+    
+    std::string prefix = "magnet:?";
+    if (magnet_link.find(prefix) == 0) {
+        magnet_link = magnet_link.substr(prefix.length());
+    }
+
+    std::string tracker_url;
+    std::string info_hash_hex;
+
+    std::stringstream ss(magnet_link);
+    std::string segment;
+
+    while (std::getline(ss, segment, '&')) {
+        size_t split_pos = segment.find('=');
+        if (split_pos == std::string::npos) continue;
+
+        std::string key = segment.substr(0, split_pos);
+        std::string val = segment.substr(split_pos + 1);
+
+        if (key == "xt") {
+            size_t pos = val.rfind(':');
+            if (pos != std::string::npos) {
+                info_hash_hex = val.substr(pos + 1);
+            } else {
+                info_hash_hex = val;
             }
+        } else if (key == "tr") {
+            tracker_url = BitTorrent::Utils::UrlDecode(val);
+        }
+    }
 
-            std::string tracker_url;
-            std::string info_hash_hex;
+    if (tracker_url.empty() || info_hash_hex.empty()) {
+        std::cerr << "Invalid magnet link\n";
+        return 1;
+    }
 
-            std::stringstream ss(magnet_link);
-            std::string segment;
+    std::cout << "Tracker URL: " << tracker_url << "\n";
 
-            while (std::getline(ss, segment, '&')) {
-                size_t split_pos = segment.find('=');
-                if (split_pos == std::string::npos) continue;
+    BitTorrent::TorrentInfo t;
+    t.announce = tracker_url;
+    t.info_hash_raw = BitTorrent::Utils::HexToBytes(info_hash_hex);
+    t.length = 999;
 
-                std::string key = segment.substr(0, split_pos);
-                std::string val = segment.substr(split_pos + 1);
+    auto peers = BitTorrent::Client::GetPeers(t);
+    if (peers.empty()) {
+        std::cerr << "No peers found\n";
+        return 1;
+    }
 
-                if (key == "xt") {
-                    size_t pos = val.rfind(':');
-                    if (pos != std::string::npos) {
-                        info_hash_hex = val.substr(pos + 1);
-                    } else {
-                        info_hash_hex = val;
-                    }
-                } else if (key == "tr") {
-                    tracker_url = BitTorrent::Utils::UrlDecode(val);
-                }
-            }
-
-            std::cout << "Tracker URL: " << tracker_url << "\n";
-
-            BitTorrent::TorrentInfo t;
-            t.announce = tracker_url;
-            t.info_hash_raw = BitTorrent::Utils::HexToBytes(info_hash_hex);
-            t.length = 999; 
-
-            auto peers = BitTorrent::Client::GetPeers(t);
-            if (peers.empty()) return 1;
-
+    for (const auto& peer : peers) {
+        int sock = -1;
+        try {
             std::vector<uint8_t> peer_id;
             bool peer_supports_ext = false;
             
-        
-            int sock = BitTorrent::Client::PerformHandshake(peers[0].ip, peers[0].port, t, peer_id, peer_supports_ext, true);
+            sock = BitTorrent::Client::PerformHandshake(peer.ip, peer.port, t, peer_id, peer_supports_ext, true);
             
-    
-            std::vector<uint8_t> bitfield_msg;
-            BitTorrent::Client::ReadMessage(sock, bitfield_msg);
-
-            if (peer_supports_ext) {
-              
-                BitTorrent::Client::SendExtensionHandshake(sock);
-                int ext_id = BitTorrent::Client::ReceiveExtensionHandshake(sock);
-             
-                BitTorrent::Client::SendMetadataRequest(sock, ext_id, 0);
+            if (!peer_supports_ext) {
+                close(sock);
+                continue;
             }
 
+            BitTorrent::Client::SendExtensionHandshake(sock);
+            int peer_ext_id = BitTorrent::Client::ReceiveExtensionHandshake(sock);
+          
+            BitTorrent::Client::SendMetadataRequest(sock, peer_ext_id, 0);
+            
+         
+            std::vector<uint8_t> metadata_raw = BitTorrent::Client::ReceiveMetadataResponse(sock, 1);
+            
+            std::string metadata_str(metadata_raw.begin(), metadata_raw.end());
+            json info = BitTorrent::BEncoder::Decode(metadata_str);
+            
+            std::cout << "Length: " << info["length"] << "\n";
+            std::cout << "Info Hash: " << info_hash_hex << "\n";
+            std::cout << "Piece Length: " << info["piece length"] << "\n";
+            std::cout << "Piece Hashes:\n";
+            
+            std::string pieces = info["pieces"].get<std::string>();
+            for (size_t i = 0; i < pieces.size(); i += 20) {
+                std::cout << BitTorrent::Utils::ToHex((const unsigned char*)pieces.data() + i, 20) << "\n";
+            }
+            
             close(sock);
+            return 0;
+            
+        } catch (const std::exception& e) {
+            if (sock >= 0) close(sock);
+            continue;
         }
+    }
+    
+    std::cerr << "Failed to retrieve metadata from any peer\n";
+    return 1;
+}
+
+
+
         else {
             std::cerr << "Unknown command: " << cmd << "\n";
             return 1;
