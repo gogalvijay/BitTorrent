@@ -1039,6 +1039,111 @@ int main(int argc, char* argv[]) {
             std::cerr << "Failed to download piece from any peer\n";
             return 1;
         }
+        else if (cmd == "magnet_download") {
+            if (argc < 5) return 1;
+            std::string output = argv[3];
+            std::string magnet_link = argv[4];
+
+            std::string prefix = "magnet:?";
+            if (magnet_link.find(prefix) == 0) {
+                magnet_link = magnet_link.substr(prefix.length());
+            }
+
+            std::string tracker_url;
+            std::string info_hash_hex;
+
+            std::stringstream ss(magnet_link);
+            std::string segment;
+
+            while (std::getline(ss, segment, '&')) {
+                size_t split_pos = segment.find('=');
+                if (split_pos == std::string::npos) continue;
+
+                std::string key = segment.substr(0, split_pos);
+                std::string val = segment.substr(split_pos + 1);
+
+                if (key == "xt") {
+                    size_t pos = val.rfind(':');
+                    if (pos != std::string::npos) {
+                        info_hash_hex = val.substr(pos + 1);
+                    } else {
+                        info_hash_hex = val;
+                    }
+                } else if (key == "tr") {
+                    tracker_url = BitTorrent::Utils::UrlDecode(val);
+                }
+            }
+
+            if (tracker_url.empty() || info_hash_hex.empty()) {
+                std::cerr << "Invalid magnet link\n";
+                return 1;
+            }
+
+            BitTorrent::TorrentInfo t;
+            t.announce = tracker_url;
+            t.info_hash_raw = BitTorrent::Utils::HexToBytes(info_hash_hex);
+            t.length = 999; 
+
+            auto peers = BitTorrent::Client::GetPeers(t);
+            if (peers.empty()) {
+                std::cerr << "No peers found\n";
+                return 1;
+            }
+
+            for (const auto& peer : peers) {
+                int sock = -1;
+                try {
+                    std::vector<uint8_t> peer_id;
+                    bool peer_supports_ext = false;
+                    
+                    sock = BitTorrent::Client::PerformHandshake(peer.ip, peer.port, t, peer_id, peer_supports_ext, true);
+                    
+                    if (!peer_supports_ext) {
+                        close(sock);
+                        continue;
+                    }
+
+                    BitTorrent::Client::SendExtensionHandshake(sock);
+                    int peer_ext_id = BitTorrent::Client::ReceiveExtensionHandshake(sock);
+                
+                    BitTorrent::Client::SendMetadataRequest(sock, peer_ext_id, 0);
+                    
+                    std::vector<uint8_t> metadata_raw = BitTorrent::Client::ReceiveMetadataResponse(sock, 1);
+                    
+                    std::string metadata_str(metadata_raw.begin(), metadata_raw.end());
+                    json info = BitTorrent::BEncoder::Decode(metadata_str);
+                    
+                    t.length = info["length"].get<long long>();
+                    t.piece_length = info["piece length"].get<long long>();
+                    t.pieces = info["pieces"].get<std::string>();
+                    if (info.contains("name")) {
+                        t.name = info["name"].get<std::string>();
+                    }
+                    t.info_hash_str = info_hash_hex;
+
+                    BitTorrent::Client::WaitForUnchoke(sock);
+                    
+                    std::ofstream out(output, std::ios::binary);
+                    int total_pieces = (t.length + t.piece_length - 1) / t.piece_length;
+
+                    for (int i = 0; i < total_pieces; i++) {
+                        auto data = BitTorrent::Client::DownloadPiece(sock, t, i);
+                        out.write((char*)data.data(), data.size());
+                        std::cout << "Downloaded piece " << i << "\n";
+                    }
+                    
+                    close(sock);
+                    std::cout << "Download complete\n";
+                    return 0;
+                    
+                } catch (const std::exception& e) {
+                    if (sock >= 0) close(sock);
+                    continue;
+                }
+            }
+            std::cerr << "Failed to download file from any peer\n";
+            return 1;
+        }
         else {
             std::cerr << "Unknown command: " << cmd << "\n";
             return 1;
