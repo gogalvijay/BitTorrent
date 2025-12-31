@@ -38,7 +38,7 @@ To build and run this project, you need the following:
 
 You can build the project using the provided helper script or standard CMake commands.
 
-Usage
+##Usage
 
 The application is run via the command line. Below are the supported commands.
 1. BEncode Debugging
@@ -47,8 +47,7 @@ Decodes a Bencoded string and prints the JSON representation.
 Bash
 
 ./your_program.sh decode <bencoded_string>
-# Example:
-./your_program.sh decode "d3:foo3:bare"
+
 
 2. Torrent File Operations
 
